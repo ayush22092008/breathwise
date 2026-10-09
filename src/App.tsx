@@ -1,0 +1,71 @@
+import { useEffect, useMemo, useState } from 'react'
+import { getAirData, searchLocations, type AirData, type Location } from './api'
+import { getActions, getBand, weatherLabel } from './recommendations'
+
+const defaultLocation: Location = { name: 'New Delhi', latitude: 28.6139, longitude: 77.209, country: 'India' }
+type Profile = 'general' | 'child' | 'respiratory' | 'elderly' | 'outdoor'
+const profiles: Record<Profile, { label: string; threshold: number }> = { general: { label: 'General public', threshold: 100 }, child: { label: 'Child', threshold: 75 }, respiratory: { label: 'Asthma / COPD', threshold: 75 }, elderly: { label: 'Older adult', threshold: 75 }, outdoor: { label: 'Outdoor worker', threshold: 150 } }
+
+function App() {
+  const [location, setLocation] = useState<Location>(defaultLocation), [data, setData] = useState<AirData | null>(null)
+  const [query, setQuery] = useState(''), [results, setResults] = useState<Location[]>([]), [searching, setSearching] = useState(false)
+  const [loading, setLoading] = useState(true), [error, setError] = useState(''), [lastUpdated, setLastUpdated] = useState('')
+  const [profile, setProfile] = useState<Profile>(() => (localStorage.getItem('breathewise-profile') as Profile) || 'general')
+  const [activity, setActivity] = useState('Walk / commute'), [duration, setDuration] = useState(30)
+  const [alerts, setAlerts] = useState(() => localStorage.getItem('breathewise-alerts') === 'true')
+  const [compareQuery, setCompareQuery] = useState(''), [comparison, setComparison] = useState<AirData | null>(null), [compareLoading, setCompareLoading] = useState(false)
+  const [question, setQuestion] = useState(''), [answer, setAnswer] = useState('')
+
+  async function load(next = location) {
+    setLoading(true); setError('')
+    try { const result = await getAirData(next); setData(result); setLastUpdated(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })) }
+    catch { setError('We could not reach the live air-quality service. Try again in a moment.') }
+    finally { setLoading(false) }
+  }
+  useEffect(() => { void load() }, [])
+  useEffect(() => {
+    const text = query.trim(); if (text.length < 2) { setResults([]); setSearching(false); return }
+    const timer = window.setTimeout(async () => { setSearching(true); try { setResults(await searchLocations(text)); setError('') } catch { setError('Location search is unavailable right now.') } finally { setSearching(false) } }, 250)
+    return () => window.clearTimeout(timer)
+  }, [query])
+  useEffect(() => { localStorage.setItem('breathewise-profile', profile) }, [profile])
+  useEffect(() => { localStorage.setItem('breathewise-alerts', String(alerts)) }, [alerts])
+  useEffect(() => {
+    if (alerts && data?.aqi !== null && data?.aqi !== undefined && data.aqi > 150 && 'Notification' in window && Notification.permission === 'granted') {
+      new Notification('BreatheWise air alert', { body: `${location.name} is at AQI ${data.aqi}. Avoid strenuous outdoor activity.` })
+    }
+  }, [alerts, data?.aqi, location.name])
+
+  const band = getBand(data?.aqi ?? null), actions = getActions(data?.aqi ?? null), selected = profiles[profile]
+  const plan = useMemo(() => {
+    const aqi = data?.aqi ?? 0, safe = aqi <= selected.threshold
+    if (aqi > 200) return { title: 'Stay indoors today', detail: `${activity} is not recommended for ${duration} minutes at this AQI. Move it indoors or postpone it.` }
+    if (!safe) return { title: 'Choose a cleaner window', detail: `${selected.label} profile: wait for a lower-AQI forecast hour before spending ${duration} minutes outside.` }
+    if (activity === 'Run / intense exercise' && aqi > 75) return { title: 'Keep it light', detail: 'Choose an easy pace, shorten the session, and stop if your breathing feels irritated.' }
+    return { title: 'Good to go with awareness', detail: `${duration} minutes of ${activity.toLowerCase()} looks reasonable for your selected profile. Keep water and any prescribed medication nearby.` }
+  }, [activity, data?.aqi, duration, selected.label, selected.threshold])
+
+  async function choose(item: Location) { setLocation(item); setResults([]); setQuery(''); setComparison(null); await load(item) }
+  async function compare() { if (compareQuery.trim().length < 2) return; setCompareLoading(true); try { const places = await searchLocations(compareQuery.trim()); if (places[0]) setComparison(await getAirData(places[0])) } catch { setError('Comparison location could not be loaded.') } finally { setCompareLoading(false) } }
+  async function toggleAlerts() { if (!alerts && 'Notification' in window && Notification.permission !== 'granted') await Notification.requestPermission(); setAlerts(!alerts) }
+  function answerQuestion(event: React.FormEvent) { event.preventDefault(); const q = question.toLowerCase(), value = data?.aqi ?? null; if (q.includes('run') || q.includes('exercise')) setAnswer(value !== null && value <= selected.threshold ? `For ${profiles[profile].label.toLowerCase()}, a short, easy session is reasonable at AQI ${value}. Avoid intense exercise if you feel symptoms.` : `I would skip outdoor exercise at AQI ${value ?? '—'} and use an indoor option.`); else if (q.includes('child') || q.includes('kid')) setAnswer(value !== null && value <= 75 ? 'Outdoor play is generally more comfortable at this reading, but watch for coughing or irritation.' : 'Keep outdoor play shorter, avoid strenuous activity, and check again during a cleaner forecast window.'); else if (q.includes('window') || q.includes('indoor')) setAnswer(value !== null && value > 100 ? 'Keep windows closed during the pollution peak, avoid indoor smoke, and ventilate when the forecast improves.' : 'Ventilate when outdoor air feels fresh and avoid adding smoke indoors.'); else setAnswer(`Current AQI is ${value ?? 'unavailable'} (${band.label}). Ask me about running, children, windows, or indoor air.`) }
+
+  return <main>
+    <header className="topbar"><a className="brand" href="/"><span className="brand-mark">◌</span> BreatheWise <span className="ai-pill">AI</span></a><span className="live-dot">● Live environmental guidance</span></header>
+    <section className="hero"><div><p className="eyebrow">AIR TRACK · ENVIRONMENTAL HACKS</p><h1>Know your air.<br /><em>Protect your day.</em></h1><p className="hero-copy">A personal pollution planner that turns live air quality into safer times, routes, and routines.</p></div><div className="search-wrap"><form onSubmit={e => { e.preventDefault(); if (results[0]) void choose(results[0]) }} className="search"><span>⌕</span><input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search a city or neighbourhood" aria-label="Search location" /><button disabled={searching}>{searching ? 'Searching…' : 'Search'}</button></form>{results.length > 0 && <div className="results">{results.map(item => <button key={`${item.latitude}-${item.longitude}`} onClick={() => void choose(item)}>{item.name}<small>{[item.admin1, item.country].filter(Boolean).join(', ')}</small></button>)}</div>}{searching && results.length === 0 && <div className="search-hint">Searching locations…</div>}</div></section>
+    {error && <div className="notice error"><strong>Something went wrong.</strong> {error} <button onClick={() => void load()}>Retry</button></div>}
+    <section className="location-row"><div><span className="pin">⌖</span><strong>{location.name}</strong><span className="muted"> {[location.admin1, location.country].filter(Boolean).join(', ')}</span></div><div className="location-actions"><button className="map-link" onClick={() => window.open(`https://www.openstreetmap.org/?mlat=${location.latitude}&mlon=${location.longitude}#map=11/${location.latitude}/${location.longitude}`, '_blank')}>⌖ Map</button><button className="refresh" onClick={() => void load()} disabled={loading}>↻ {loading ? 'Updating…' : 'Refresh'}</button></div></section>
+    {loading && !data ? <div className="loading-card">Gathering live air and weather data for {location.name}…</div> : <>
+      <section className="dashboard-grid"><article className={`aqi-card ${band.color}`}><div className="card-top"><span className="label">CURRENT AQI</span><span className="source-badge">US AQI</span></div><div className="aqi-number">{data?.aqi ?? '—'}</div><div className="band-label">{band.label}</div><p>{band.detail}</p><div className="meter"><span style={{ width: `${Math.min(100, ((data?.aqi ?? 0) / 300) * 100)}%` }} /></div><div className="meter-labels"><span>0 Good</span><span>300+ Hazardous</span></div></article><article className="weather-card"><div className="card-top"><span className="label">OUTSIDE NOW</span><span className="weather-icon">☼</span></div><div className="temperature">{data?.temperature ?? '—'}<sup>°C</sup></div><div className="weather-name">{weatherLabel(data?.weatherCode ?? null)}</div><div className="weather-stats"><span>Feels like <b>{data?.feelsLike ?? '—'}°</b></span><span>Humidity <b>{data?.humidity ?? '—'}%</b></span><span>Wind <b>{data?.windSpeed ?? '—'} km/h</b></span></div></article></section>
+      <section className="planner guidance"><div className="section-heading"><div><p className="eyebrow">YOUR DAY PLANNER</p><h2>Can I go outside?</h2></div><span className={`status-chip ${band.color}`}>{plan.title}</span></div><div className="planner-controls"><label>Who are you?<select value={profile} onChange={e => setProfile(e.target.value as Profile)}>{Object.entries(profiles).map(([key, item]) => <option value={key} key={key}>{item.label}</option>)}</select></label><label>Activity<select value={activity} onChange={e => setActivity(e.target.value)}><option>Walk / commute</option><option>Run / intense exercise</option><option>Cycle</option><option>Outdoor work</option><option>Children’s play</option></select></label><label>Duration<select value={duration} onChange={e => setDuration(Number(e.target.value))}><option value="15">15 minutes</option><option value="30">30 minutes</option><option value="60">60 minutes</option><option value="120">2 hours</option></select></label></div><div className="plan-result"><strong>{plan.title}</strong><span>{plan.detail}</span></div></section>
+      <section className="guidance"><div className="section-heading"><div><p className="eyebrow">PERSONALISED GUIDANCE</p><h2>What this means for you</h2></div><span className={`status-chip ${band.color}`}>{band.advice}</span></div><div className="actions"><div className="action do"><h3><span>✓</span> Do</h3>{actions.do.map(item => <p key={item}>{item}</p>)}</div><div className="action avoid"><h3><span>×</span> Avoid</h3>{actions.avoid.map(item => <p key={item}>{item}</p>)}</div></div></section>
+      <section className="forecast pollutants"><div className="section-heading"><div><p className="eyebrow">PLAN AHEAD</p><h2>Next 24 hours</h2></div><span className="muted">Forecast window · US AQI</span></div><div className="forecast-row">{data?.hourlyForecast.map(hour => <div className={`forecast-hour ${getBand(hour.aqi).color}`} key={hour.time}><small>{new Date(hour.time).toLocaleTimeString([], { hour: '2-digit' })}</small><strong>{hour.aqi ?? '—'}</strong><span>{hour.temperature ?? '—'}°</span></div>)}</div></section>
+      <section className="two-col"><div className="guidance indoor"><div className="section-heading"><div><p className="eyebrow">INDOOR AIR MODE</p><h2>Make home safer</h2></div></div><p className="muted">{(data?.aqi ?? 0) > 100 ? 'Outdoor pollution is elevated. Reduce what enters your home until the air improves.' : 'Outdoor air is relatively comfortable. Ventilate when it feels fresh.'}</p><div className="indoor-list"><span>✓ Avoid incense, smoking, and unnecessary indoor smoke</span><span>✓ Cook with ventilation, away from sleeping areas</span><span>✓ Ventilate when a forecast hour is cleaner</span></div></div><div className="guidance alerts"><div className="section-heading"><div><p className="eyebrow">STAY AHEAD</p><h2>Pollution alerts</h2></div><button className="toggle" onClick={() => void toggleAlerts()}>{alerts ? 'On' : 'Off'}</button></div><p className="muted">Get a browser alert when BreatheWise detects a high-AQI reading. Keep this tab open for this prototype.</p></div></section>
+      <section className="guidance compare"><div className="section-heading"><div><p className="eyebrow">COMPARE PLACES</p><h2>Where is cleaner?</h2></div></div><form className="compare-form" onSubmit={e => { e.preventDefault(); void compare() }}><input value={compareQuery} onChange={e => setCompareQuery(e.target.value)} placeholder="Compare another city" /><button className="refresh">{compareLoading ? 'Loading…' : 'Compare'}</button></form>{comparison && <div className="comparison"><div><strong>{location.name}</strong><b>{data?.aqi ?? '—'}</b><span>{getBand(data?.aqi ?? null).label}</span></div><div><strong>{comparison.location.name}</strong><b>{comparison.aqi ?? '—'}</b><span>{getBand(comparison.aqi).label}</span></div></div>}</section>
+      <section className="guidance assistant"><div className="section-heading"><div><p className="eyebrow">BREATHEWISE AI</p><h2>Ask about your day</h2></div></div><form className="assistant-form" onSubmit={answerQuestion}><input value={question} onChange={e => setQuestion(e.target.value)} placeholder="Can I run outside? Is it safe for a child?" /><button className="refresh">Ask</button></form>{answer && <div className="answer">{answer}</div>}</section>
+      <section className="pollutants"><div className="section-heading"><div><p className="eyebrow">WHAT’S IN THE AIR</p><h2>Pollutant snapshot</h2></div><span className="muted">Hourly observation</span></div><div className="pollutant-grid">{[['PM2.5', data?.pm25, 'µg/m³'], ['PM10', data?.pm10, 'µg/m³'], ['O₃ ozone', data?.ozone, 'µg/m³'], ['NO₂', data?.no2, 'µg/m³']].map(([name, value, unit]) => <div className="pollutant" key={String(name)}><span>{name}</span><strong>{value ?? '—'}</strong><small>{unit}</small></div>)}</div></section>
+    </>}
+    <footer><span>Data from <a href="https://open-meteo.com/" target="_blank">Open-Meteo</a> · updated {lastUpdated || '—'}</span><span>AQI may differ from AccuWeather because providers use different models and scales. Not medical advice.</span></footer>
+  </main>
+}
+export default App
